@@ -20,7 +20,7 @@ llm = ChatOpenAI(
 )
 
 
-df = pd.read_csv('/content/식당정보 주소기반검색.csv')
+df = pd.read_csv('/content/res_info.csv')
 restaurant = df[['MCT_NM', 'name']]
 
 results = []
@@ -45,4 +45,4 @@ for i, MCT_NM, name in restaurant.itertuples(index=True):
 
 df['result'] = results
 
-df.to_csv('./식당정보 주소기반검색-result.csv', index=False)
+df.to_csv('./res-info-result.csv', index=False)

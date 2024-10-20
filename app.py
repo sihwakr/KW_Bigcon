@@ -8,26 +8,62 @@ from langchain.storage import LocalFileStore
 from langchain_community.vectorstores import FAISS
 from langchain_community.chat_models import ChatOllama
 from langchain_community.embeddings import OllamaEmbeddings
+import os
+import google.generativeai as genai
+from dotenv import load_dotenv
+import sqlite3
 
-st.title("ga111o!")
+
+load_dotenv()
+
+
+model = "llama2"
+
+
+st.title("jeju!")
 
 embeddings = OllamaEmbeddings(model="llama3.1:latest")
-llm = ChatOllama(model="llama3.1:latest", temperature=0.1, streaming=True)
+
+api_key = os.getenv("GEMINI_API_KEY")
+
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+
+generation_config = {
+    "temperature": 0.05,
+    "top_p": 0.95,
+    "top_k": 64,
+    "max_output_tokens": 8192,
+}
+
+
+if model == "llama":
+    llm = ChatOllama(model="llama3.1:latest", temperature=0.1, streaming=True)
+else:
+    llm = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        generation_config=generation_config,
+    )
+    chat_session = llm.start_chat(
+        history=[
+        ]
+    )
 
 
 theme_retrievers = {}
-
+food_type_file_retrievers = {}
 
 MD_DIR = r"./.cache/data"
 
 
-THEME_FILES = {
-    "ttest": ["test1.md"],
-    "ttest2": [
-        "test2.md",
-        "test2-1.md"
+FOOD_TYPE_FILES = {
+    "FOODTYPE_NAVER": [
+        "test1.txt"
     ],
 }
+
+
+conn = sqlite3.connect('./jeju.db')
+cursor = conn.cursor()
 
 
 def embed_file(file_path: str):
@@ -58,105 +94,131 @@ def format_docs(docs):
     return combined_docs
 
 
-prompt = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            """
-            Answer the user's question in one line
+def recommend(restaurant_type=None):
+    # 데이터베이스 연결
+    conn = sqlite3.connect('./jeju.db')
+    cursor = conn.cursor()
 
-            Context: {context}
-            """,
-        ),
-        ("human", "{question}"),
-    ]
+    # 기본 쿼리
+    query = """WITH MaxVisitCounts AS (
+    SELECT 
+        r.placeID,
+        MAX(r.visit_count) AS max_visit_count
+    FROM 
+        Review r
+    WHERE 
+        r.visit_count >= 2
+    GROUP BY 
+        r.placeID
+),
+TotalReviewCounts AS (
+    SELECT 
+        r.placeID,
+        COUNT(*) AS total_review_count
+    FROM 
+        Review r
+    GROUP BY 
+        r.placeID
+),
+AggregatedData AS (
+    SELECT 
+        i.placeID,
+        i.MCT_NM,
+        i.UE_AMT_GRP,
+        COALESCE(SUM(m.max_visit_count), 0) AS total_visit_count,
+        COALESCE(trc.total_review_count, 0) AS total_review_count,
+        i.MCT_TYPE
+    FROM 
+        Information i
+    LEFT JOIN 
+        MaxVisitCounts m ON i.placeID = m.placeID
+    LEFT JOIN 
+        TotalReviewCounts trc ON i.placeID = trc.placeID
+    GROUP BY 
+        i.placeID, i.MCT_NM, i.UE_AMT_GRP, i.MCT_TYPE
 )
+SELECT 
+    a.placeID,
+    a.MCT_NM,
+    a.UE_AMT_GRP,
+    (6 * (6 - a.UE_AMT_GRP) + 4 * (a.total_visit_count / NULLIF(a.total_review_count, 0))) AS score
+FROM 
+    AggregatedData a
 
-theme = st.selectbox("theme?", list(THEME_FILES.keys()))
+"""
 
-question = st.text_input("question!")
+    if restaurant_type:
+        query += f"WHERE a.MCT_TYPE = ?"
 
+    query += " ORDER BY score DESC LIMIT 10;"
 
-if st.button("테마 선택"):
-    if theme in THEME_FILES:
-        combined_content = ""
-        for file_name in THEME_FILES[theme]:
-            file_path = os.path.join(MD_DIR, file_name)
-            try:
-                with open(file_path, "r", encoding='utf-8') as file:
-                    combined_content += file.read() + "\n\n"
-            except FileNotFoundError:
-                st.error(f"FileNotFoundError {file_name}")
-                continue
-            except Exception as e:
-                st.error(f"{file_name} - {str(e)}")
-                continue
-
-        cache_dir = f"./.cache/embeddings/{theme}"
-        os.makedirs(cache_dir, exist_ok=True)
-
-        docs = [Document(page_content=combined_content)]
-        vectorstore = FAISS.from_documents(docs, embeddings)
-        theme_retrievers[theme] = vectorstore.as_retriever()
-        st.session_state.selected_theme = theme
-        st.success(f"{theme} selected!")
+    if restaurant_type:
+        cursor.execute(query, (restaurant_type,))
     else:
-        st.error(f"theme in THEME_FILES {theme}, {THEME_FILES}")
+        cursor.execute(query)
 
-    if theme in THEME_FILES:
-        combined_content = ""
-        for file_name in THEME_FILES[theme]:
-            file_path = os.path.join(MD_DIR, file_name)
-            try:
-                with open(file_path, "r", encoding='utf-8') as file:
-                    combined_content += file.read() + "\n\n"
-            except FileNotFoundError:
-                st.error(f"FileNotFoundError: {file_name}")
-                continue
-            except Exception as e:
-                st.error(f"{file_name} - {str(e)}")
-                continue
+    results = cursor.fetchall()
 
-        cache_dir = f"./.cache/embeddings/{theme}"
-        cache_store = LocalFileStore(cache_dir)
-        embeddings = OllamaEmbeddings()
-        cached_embeddings = CacheBackedEmbeddings.from_bytes_store(
-            embeddings, cache_store)
-        docs = [Document(page_content=combined_content)]
-        vectorstore = FAISS.from_documents(docs, cached_embeddings)
-        print(1)
-        theme_retrievers[theme] = vectorstore.as_retriever()
-        print(2)
-        print(theme_retrievers)
+    for row in results:
+        print(row)
 
-        st.session_state.selected_theme = theme
-        st.success(f"{theme} selected!")
+    cursor.close()
+    conn.close()
 
-        selected_theme = st.session_state.get(
-            'selected_theme')
-        print(selected_theme)
-        print(theme_retrievers)
-        if selected_theme not in theme_retrievers:
-            st.error(
-                f"selected_theme not in tehem_retrievers {selected_theme}, {theme_retrievers}")
+    return results
+
+
+with open('.cache/data/test1.txt', 'r', encoding='utf-8') as file:
+    context = file.read()
+
+
+question = st.text_input("question111")
+
+if question:
+
+    try:
+        response = chat_session.send_message(f"""
+글: {question} 
+
+위 글에서 나타나는 음식 카테고리는 뭐야? 음식의 카테고리만 말하고, 그 이외의 것은 절대 말하면 안돼. 만약 제주도 향토 음식이라면, "향토"라는 답변을 해야돼. 해당 질문에 음식 카테고리가 없다면 "없음"을 답해야 해.
+
+음식 카테고리: {context}
+""")
+        print(response.text)
+
+        print(response)
+        if isinstance(response, dict):
+            st.success(response)
         else:
-            retriever = theme_retrievers[selected_theme]
-            try:
-                chain = (
-                    {
-                        "context": retriever | RunnableLambda(format_docs),
-                        "question": RunnablePassthrough(),
-                    }
-                    | prompt
-                    | llm
-                )
-                response = chain.invoke(question)
-                if isinstance(response, dict):
-                    st.success(response)
-                else:
-                    st.success(str(response.content))
-            except Exception as e:
-                st.error(f"체인 try except 부분, {str(e)}")
+            st.success(str(response.text))
 
-    else:
-        st.error(f"theme in THEME_FILES, {theme}, {THEME_FILES}")
+        results = recommend('피자')  # 원래는 response.text를 넣어야 되겠죠..?
+        print(results)
+        st.success(results)
+
+    except Exception as e:
+        st.error(f"체인 try except 부분, {str(e)}")
+
+    is_first_question = False
+    question = None
+    print("=======================================================")
+    print(is_first_question, question)
+
+    question2 = st.text_input("question222")
+
+    if question2:
+
+        try:
+            response = chat_session.send_message(question2)
+            print(response.text)
+
+            print(response)
+            if isinstance(response, dict):
+                st.success(response)
+            else:
+                st.success(str(response.text))
+        except Exception as e:
+            st.error(f"체인 try except 부분, {str(e)}")
+
+        # 첫 번째 질문 말고, 이후에 이어서 질문하는 거....
+        print(1)
